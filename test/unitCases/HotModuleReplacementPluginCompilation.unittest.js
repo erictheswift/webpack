@@ -188,6 +188,85 @@ describe("HotModuleReplacementPlugin", () => {
 		compiler.run(callback);
 	}, 20000);
 
+	it("output.clean=true should keep the last update until a newer one is emitted, regardless of elapsed time", (done) => {
+		const outputPath = path.join(testDirectory, "js", "HotModuleReplacementPlugin");
+		const entryFile = path.join(outputPath, "entry.js");
+		const recordsFile = path.join(outputPath, "records.json");
+		let step = 0;
+		try {
+			fs.mkdirSync(outputPath, { recursive: true });
+		} catch (_err) {
+			// empty
+		}
+		fs.writeFileSync(entryFile, `${++step}`, "utf8");
+		/** @type {string[]} */
+		const updates = [];
+		const hasFile = (/** @type {string} */ file) => {
+			try {
+				fs.statSync(path.join(outputPath, file));
+				return true;
+			} catch (_err) {
+				return false;
+			}
+		};
+		const compiler = webpack({
+			mode: "development",
+			cache: false,
+			entry: {
+				0: entryFile
+			},
+			recordsPath: recordsFile,
+			output: {
+				path: outputPath,
+				clean: true
+			},
+			plugins: [new webpack.HotModuleReplacementPlugin()]
+		});
+		const callback = (
+			/** @type {Error | null} */ err,
+			/** @type {import("../../").Stats | undefined} */ _stats
+		) => {
+			if (err) return done(err);
+			const stats = /** @type {import("../../").Stats} */ (_stats);
+			const hash = stats.toJson().hash;
+			// the update emitted by the NEXT compilation is named after this hash
+			updates.push(`0.${hash}.hot-update.json`, `0.${hash}.hot-update.js`);
+
+			if (step < 3) {
+				fs.writeFileSync(entryFile, `${++step}`, "utf8");
+				return compiler.run(callback);
+			}
+
+			// step 3 emitted the update from hash(2) -> hash(3): updates[2], updates[3]
+			for (const file of updates.slice(0, 4)) {
+				expect(hasFile(file)).toBe(true);
+			}
+
+			// A client that received the "done" of step 3 fetches that update while
+			// step 4 compiles. When step 4 takes longer than 10s its emit removes
+			// the update files although nothing newer existed while it compiled.
+			return setTimeout(() => {
+				fs.writeFileSync(entryFile, `${++step}`, "utf8");
+				compiler.run((err) => {
+					if (err) return done(err);
+					try {
+						// the update older than the last one may go
+						expect(hasFile(updates[0])).toBe(false);
+						expect(hasFile(updates[1])).toBe(false);
+						// the last update must survive until a newer one exists
+						expect(hasFile(updates[2])).toBe(true);
+						expect(hasFile(updates[3])).toBe(true);
+					} catch (err) {
+						return done(err);
+					}
+					done();
+				});
+			}, 10100);
+		};
+
+		compiler.run(callback);
+	}, 20000);
+
 	it("should correct working when entry is Object and key is a number", (done) => {
 		const outputPath = path.join(testDirectory, "js", "HotModuleReplacementPlugin");
 		const entryFile = path.join(outputPath, "entry.js");
